@@ -3,27 +3,36 @@ name: Deploy MotorScope Backend (Cloudflare Worker)
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
-      - name: Publish to Cloudflare Workers
+      - name: Deploy with Wrangler (verbose)
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: |
-            bash -lc "
-            wrangler secret put ANTISPAM_SECRET --text '${{ secrets.ANTISPAM_SECRET }}'
-            wrangler secret put DVLA_VES_API_KEY --text '${{ secrets.DVLA_VES_API_KEY }}'
-            wrangler secret put DVSA_MOT_CLIENT_ID --text '${{ secrets.DVSA_MOT_CLIENT_ID }}'
-            wrangler secret put DVSA_MOT_CLIENT_SECRET --text '${{ secrets.DVSA_MOT_CLIENT_SECRET }}'
-            wrangler secret put DVSA_MOT_API_KEY --text '${{ secrets.DVSA_MOT_API_KEY }}'
-            wrangler secret put DVSA_MOT_SCOPE --text '${{ secrets.DVSA_MOT_SCOPE }}'
-            wrangler secret put DVSA_MOT_TOKEN_URL --text '${{ secrets.DVSA_MOT_TOKEN_URL }}'
-            wrangler secret put FRONTEND_ORIGIN --text '${{ secrets.FRONTEND_ORIGIN }}'
-            wrangler deploy
-            "
+            bash -euo pipefail -lc '
+            echo "Wrangler version:"; npx wrangler --version
+
+            # Push secrets to Cloudflare (safe: values come from GitHub Secrets)
+            npx wrangler secret put ANTISPAM_SECRET --text "${{ secrets.ANTISPAM_SECRET }}"
+            npx wrangler secret put DVLA_VES_API_KEY --text "${{ secrets.DVLA_VES_API_KEY }}"
+
+            if [ -n "${{ secrets.DVSA_MOT_CLIENT_ID }}" ]; then npx wrangler secret put DVSA_MOT_CLIENT_ID --text "${{ secrets.DVSA_MOT_CLIENT_ID }}"; fi
+            if [ -n "${{ secrets.DVSA_MOT_CLIENT_SECRET }}" ]; then npx wrangler secret put DVSA_MOT_CLIENT_SECRET --text "${{ secrets.DVSA_MOT_CLIENT_SECRET }}"; fi
+            if [ -n "${{ secrets.DVSA_MOT_TOKEN_URL }}" ]; then npx wrangler secret put DVSA_MOT_TOKEN_URL --text "${{ secrets.DVSA_MOT_TOKEN_URL }}"; fi
+            if [ -n "${{ secrets.DVSA_MOT_SCOPE }}" ]; then npx wrangler secret put DVSA_MOT_SCOPE --text "${{ secrets.DVSA_MOT_SCOPE }}"; fi
+            if [ -n "${{ secrets.DVSA_MOT_API_KEY }}" ]; then npx wrangler secret put DVSA_MOT_API_KEY --text "${{ secrets.DVSA_MOT_API_KEY }}"; fi
+            if [ -n "${{ secrets.TURNSTILE_SECRET }}" ]; then npx wrangler secret put TURNSTILE_SECRET --text "${{ secrets.TURNSTILE_SECRET }}"; fi
+
+            # Deploy (wrangler.toml is in repo root)
+            npx wrangler deploy --name motorscope-backend --verbose
+            '
