@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>MotorScope</title>
+<style>
+:root{
+  --bg:#f6f8fb; --card:#ffffff; --accent:#1f6feb; --muted:#677083; --text:#0f1724;
+  --glass: rgba(31,111,235,0.08); --border:#e6eaf0; --panel:#fbfdff; --shadow:0 6px 24px rgba(15,23,36,0.06);
+  --chip:#e9eefc; --chipText:#0f1724; font-family: Inter, Roboto, Arial, sans-serif;
+}
+:root.dark{ --bg:#0f1724; --card:#121a2a; --accent:#4f8fff; --muted:#93a2be; --text:#e8efff;
+  --glass:rgba(79,143,255,.12); --border:#1f2b44; --panel:#0f1724; --shadow:none; --chip:#1b2741; --chipText:#e8efff; }
+*{box-sizing:border-box}
+html,body{height:100%}
+body{ margin:0; background:linear-gradient(180deg,var(--bg),#eef3fb00); color:var(--text);
+  display:flex; align-items:center; justify-content:center; padding:32px; }
+.container{width:100%;max-width:1100px}
+.header{display:flex;align-items:center;gap:16px;margin-bottom:18px}
+.logo{width:56px;height:56px;border-radius:12px;background:var(--glass);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--accent);font-size:20px}
+h1{margin:0;font-size:20px}
+.lead{color:var(--muted);font-size:13px;margin-top:4px}
+.card{background:var(--card);border-radius:12px;padding:20px;box-shadow:var(--shadow);border:1px solid var(--border)}
+.input{flex:1;padding:12px 14px;border-radius:10px;border:1px solid var(--border);font-size:15px;background:var(--panel);color:var(--text)}
+.btn{background:var(--accent);color:white;padding:11px 14px;border-radius:10px;border:0;font-weight:600;cursor:pointer}
+.btn.secondary{background:#475569}
+.btn.ghost{background:transparent;border:1px solid var(--border);color:var(--text)}
+.btn:disabled{opacity:.6;cursor:not-allowed}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.results{margin-top:18px;display:grid;grid-template-columns:1fr 360px;gap:14px}
+.section{background:var(--panel);padding:12px;border-radius:10px;border:1px solid var(--border)}
+.kv{display:flex;justify-content:space-between;padding:6px 4px}
+.kv small{color:var(--muted)}
+.summaryGrid{display:grid;grid-template-columns:1fr 1fr; gap:12px}
+.summaryCard{border:1px solid var(--border); border-radius:10px; padding:10px; background:var(--card)}
+.history{max-height:360px;overflow:auto;padding:6px}
+.test{border-left:4px solid #e9eefc;padding:10px;margin-bottom:8px;border-radius:6px;background:var(--card);border:1px solid var(--border)}
+.test[data-result="FAILED"]{border-left-color:#dc2626}
+.test .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.chip{display:inline-flex;align-items:center;gap:6px;background:var(--chip);color:var(--chipText);padding:4px 8px;border-radius:999px;font-size:12px;border:1px solid var(--border)}
+.chip.DANGEROUS{background:#fee2e2;color:#7f1d1d;border-color:#fecaca}
+.chip.MAJOR{background:#ffe7cc;color:#7a3800;border-color:#ffd5a3}
+.chip.MINOR{background:#e7f3ff;color:#003a7a;border-color:#cfe8ff}
+.chip.ADVISORY{background:#eef6ee;color:#224d22;border-color:#d3edd3}
+.filters{display:flex;gap:8px;flex-wrap:wrap}
+.filters label{display:flex;align-items:center;gap:6px;font-size:12px;background:var(--chip);padding:4px 8px;border-radius:999px;border:1px solid var(--border);cursor:pointer}
+.footer{margin-top:14px;color:var(--muted);font-size:13px}
+@media print{
+  body{background:white;padding:0}
+  .card{box-shadow:none;border:none}
+  .toolbar,.footer,#status,#darkToggle{display:none !important}
+  .results{grid-template-columns:1fr}
+  .printHeader{display:block !important; position:fixed; top:0; left:0; right:0; padding:10px 16px; font-weight:800; font-size:16px; border-bottom:1px solid #ddd; background:#fff; color:#000}
+  body{padding-top:50px}
+}
+@media (max-width:1000px){ .summaryGrid{grid-template-columns:1fr} }
+@media (max-width:880px){ .results{grid-template-columns:1fr } .header{flex-direction:column;align-items:flex-start} }
+.spinner { width:18px;height:18px;border:3px solid #ffffff80;border-top-color:#fff;border-radius:50%;display:inline-block; vertical-align:middle; animation:spin .8s linear infinite; margin-left:6px }
+@keyframes spin{to{transform:rotate(360deg)}}
+.canvasBox{height:80px;border:1px dashed var(--border); border-radius:8px; background:var(--card); display:flex; align-items:center; justify-content:center}
+.printHeader{display:none}
+</style>
+</head>
+<body>
+<div class="printHeader">MotorScope</div>
+<div class="container">
+  <div class="header">
+    <div class="logo">MS</div>
+    <div>
+      <h1>MotorScope</h1>
+      <div class="lead">Vehicle MOT & status lookup. Keys stay on your server — never in the browser.</div>
+    </div>
+    <div style="flex:1"></div>
+    <button id="darkToggle" class="btn ghost" type="button" aria-pressed="false" title="Toggle dark mode">🌙</button>
+  </div>
+
+  <div class="card" role="main">
+    <form id="lookupForm" autocomplete="off" novalidate>
+      <div class="toolbar">
+        <input id="vrm" class="input" placeholder="First registration (e.g. AB12 CDE)" aria-label="Vehicle registration" />
+        <input id="vrm2" class="input" placeholder="Second reg (optional)" aria-label="Second vehicle registration" />
+        <button id="searchBtn" class="btn" type="submit">Search</button>
+        <button id="clearBtn" class="btn secondary" type="button">Clear</button>
+        <button id="shareBtn" class="btn ghost" type="button" title="Copy shareable link">Share</button>
+        <div style="flex:1"></div>
+        <small id="status" aria-live="polite"></small>
+      </div>
+    </form>
+
+    <div id="output" class="results" style="display:none">
+      <div>
+        <div class="section" id="summary">
+          <h3 style="margin-top:0;margin-bottom:8px">Summary</h3>
+          <div class="summaryGrid">
+            <div class="summaryCard" id="sumA">
+              <div class="kv"><small>VRM</small><div id="sA-vrm">—</div></div>
+              <div class="kv"><small>Make</small><div id="sA-make">—</div></div>
+              <div class="kv"><small>Colour</small><div id="sA-colour">—</div></div>
+              <div class="kv"><small>Fuel</small><div id="sA-fuel">—</div></div>
+              <div class="kv"><small>MOT Status</small><div id="sA-mot">—</div></div>
+              <div class="kv"><small>Tax Status</small><div id="sA-tax">—</div></div>
+              <div class="kv"><small>Mileage trend</small><div style="flex:1;margin-left:8px"><div class="canvasBox"><canvas id="sparkA" width="300" height="70"></canvas></div></div></div>
+            </div>
+            <div class="summaryCard" id="sumB">
+              <div class="kv"><small>VRM</small><div id="sB-vrm">—</div></div>
+              <div class="kv"><small>Make</small><div id="sB-make">—</div></div>
+              <div class="kv"><small>Colour</small><div id="sB-colour">—</div></div>
+              <div class="kv"><small>Fuel</small><div id="sB-fuel">—</div></div>
+              <div class="kv"><small>MOT Status</small><div id="sB-mot">—</div></div>
+              <div class="kv"><small>Tax Status</small><div id="sB-tax">—</div></div>
+              <div class="kv"><small>Mileage trend</small><div style="flex:1;margin-left:8px"><div class="canvasBox"><canvas id="sparkB" width="300" height="70"></canvas></div></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section" id="historyPanel" style="margin-top:12px">
+          <div style="display:flex;align-items:center;gap:12px">
+            <h3 style="margin:0">MOT History (Vehicle A)</h3>
+            <div class="filters">
+              <label><input type="checkbox" id="failsOnly" /> Show fails only</label>
+              <label><input type="checkbox" class="chipToggle" data-chip="DANGEROUS" checked /> Dangerous</label>
+              <label><input type="checkbox" class="chipToggle" data-chip="MAJOR" checked /> Major</label>
+              <label><input type="checkbox" class="chipToggle" data-chip="MINOR" checked /> Minor</label>
+              <label><input type="checkbox" class="chipToggle" data-chip="ADVISORY" checked /> Advisory</label>
+            </div>
+          </div>
+          <div id="history" class="history" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <div>
+        <div class="section">
+          <h3 style="margin-top:0;margin-bottom:8px">Downloads</h3>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <button id="downloadPDF" class="btn" type="button">Download PDF</button>
+            <button id="exportJSON" class="btn secondary" type="button">Download JSON</button>
+            <button id="exportCSV" class="btn secondary" type="button">Download CSV</button>
+          </div>
+        </div>
+
+        <div class="section" style="margin-top:12px">
+          <h3 style="margin-top:0;margin-bottom:8px">Notes on privacy & spam</h3>
+          <div style="font-size:13px;color:var(--muted)">
+            Frontend only — calls your secure backend. Backend enforces CAPTCHA, rate limits, CORS, and short‑lived anti‑spam tokens.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="errorBox" style="display:none;margin-top:12px" role="alert"></div>
+    <div class="footer">Backend: <code id="backendUrlDisplay"></code></div>
+  </div>
+</div>
+
+<script>
+const BACKEND_URL = "https://YOUR_BACKEND.example.com";
+const MIN_VRM_LEN = 2, MAX_VRM_LEN = 10;
+const el = id => document.getElementById(id);
+const setStatus = s => el('status').textContent = s;
+function cleanVrm(v){ return (v||'').replace(/[^A-Za-z0-9]/g,'').toUpperCase(); }
+(function initTheme(){
+  const pref = localStorage.getItem('theme') || 'light';
+  if(pref==='dark'){ document.documentElement.classList.add('dark'); el('darkToggle').setAttribute('aria-pressed','true'); }
+  el('darkToggle').addEventListener('click', ()=>{
+    const isDark = document.documentElement.classList.toggle('dark');
+    localStorage.setItem('theme', isDark ? 'dark':'light');
+    el('darkToggle').setAttribute('aria-pressed', String(isDark));
+  });
+})();
+function showError(msg){
+  const box = el('errorBox'); box.style.display='block'; box.textContent = msg;
+  box.style.background = '#ffeef0'; box.style.border = '1px solid #ffccd5'; box.style.padding='10px'; box.style.color='#7f1d1d';
+}
+let lastCall = 0, backoff = 0;
+async function antiSpamToken(vrm){
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/antispam`, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({vrm})});
+    if(!r.ok) throw new Error('Anti-spam check failed');
+    const j = await r.json(); return j && j.token;
+  } catch(e){ return null; }
+}
+async function fetchVes(vrm, token){
+  const url = new URL(`${BACKEND_URL}/api/ves`); url.searchParams.set('vrm', vrm);
+  const r = await fetch(url, {headers:{'x-client-token': token}});
+  if(!r.ok){ const t = await r.text().catch(()=>r.statusText); throw new Error(t || 'VES failed'); }
+  return r.json();
+}
+async function fetchMotTests(vrm, token){
+  const url = new URL(`${BACKEND_URL}/api/mot/tests`); url.searchParams.set('vrm', vrm);
+  const r = await fetch(url, {headers:{'x-client-token': token}});
+  if(!r.ok){ const t = await r.text().catch(()=>r.statusText); throw new Error(t || 'MOT failed'); }
+  return r.json();
+}
+function renderSummaryTo(prefix, ves){
+  el(`${prefix}-vrm`).textContent = ves.registrationNumber || '—';
+  el(`${prefix}-make`).textContent = ves.make || '—';
+  el(`${prefix}-colour`).textContent = ves.colour || '—';
+  el(`${prefix}-fuel`).textContent = ves.fuelType || '—';
+  el(`${prefix}-mot`).textContent = ves.motStatus || '—';
+  el(`${prefix}-tax`).textContent = ves.taxStatus || '—';
+}
+function renderHistory(tests){
+  const h = el('history'); h.innerHTML='';
+  if(!tests || tests.length===0 || tests.info){ h.textContent = tests.info || 'No MOT tests found.'; h.dataset.raw = JSON.stringify([]); return; }
+  const frag = document.createDocumentFragment();
+  const raw = [];
+  tests.forEach(t=>{
+    const div = document.createElement('div'); div.className='test';
+    const result = (t.testResult || t.result || 'UNKNOWN').toUpperCase();
+    div.dataset.result = result;
+    const date = t.completedDate || t.date || 'Unknown date';
+    const res = t.testResult || t.result || 'Unknown';
+    const odo = t.odometerValue ? (t.odometerValue + ' ' + (t.odometerUnit||'miles')) : '—';
+    div.innerHTML = `<strong>${date} — ${res}</strong><div style="color:var(--muted);font-size:13px;margin-top:6px">Odometer: ${odo}</div>`;
+    const defects = t.rfrAndComments || t.defects || t.advisories || [];
+    const chipsBox = document.createElement('div'); chipsBox.className='chips';
+    defects.forEach(d=>{
+      const type = (d.type || d.deficiencyCategory || 'ADVISORY').toUpperCase();
+      const span = document.createElement('span'); span.className = `chip ${type}`; span.dataset.type = type;
+      span.textContent = (type ? `[${type}] ` : '') + (d.text || d.deficiencyText || '');
+      chipsBox.appendChild(span);
+    });
+    if(defects.length) div.appendChild(chipsBox);
+    frag.appendChild(div);
+    raw.append(t);
+  });
+  h.appendChild(frag);
+  h.dataset.raw = JSON.stringify(raw);
+  applyFilters();
+}
+function drawSparkline(canvasId, tests){
+  const c = document.getElementById(canvasId);
+  if(!c || !c.getContext) return;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0,0,c.width,c.height);
+  const points = [];
+  (tests||[]).forEach(t=>{
+    const d = new Date(t.completedDate || t.date || '');
+    const v = parseInt(t.odometerValue, 10);
+    if(!isNaN(d.getTime()) && !isNaN(v)) points.push({x: d.getTime(), y: v});
+  });
+  if(points.length<2){
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--muted') || '#888';
+    ctx.font = '12px sans-serif'; ctx.fillText('no mileage data', 6, 40); return;
+  }
+  points.sort((a,b)=>a.x-b.x);
+  const minX = points[0].x, maxX = points[points.length-1].x;
+  const minY = Math.min(...points.map(p=>p.y)), maxY = Math.max(...points.map(p=>p.y));
+  const pad = 6, W=c.width-2*pad, H=c.height-2*pad;
+  const sx = x => pad + ((x-minX)/(maxX-minX))*W;
+  const sy = y => pad + H - ((y-minY)/(maxY-minY))*H;
+  ctx.lineWidth = 2; ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#1f6feb';
+  ctx.beginPath(); ctx.moveTo(sx(points[0].x), sy(points[0].y));
+  for(let i=1;i<points.length;i++){ ctx.lineTo(sx(points[i].x), sy(points[i].y)); }
+  ctx.stroke();
+  ctx.fillStyle = ctx.strokeStyle;
+  points.forEach(p=>{ ctx.beginPath(); ctx.arc(sx(p.x), sy(p.y), 2.5, 0, Math.PI*2); ctx.fill(); });
+}
+function collectData(){
+  const sA = ['vrm','make','colour','fuel','mot','tax'].reduce((o,k)=> (o[k]=el('sA-'+k).textContent, o), {});
+  const sB = ['vrm','make','colour','fuel','mot','tax'].reduce((o,k)=> (o[k]=el('sB-'+k).textContent, o), {});
+  const tests = JSON.parse(el('history').dataset.raw || '[]');
+  return { summaryA: sA, summaryB: sB, tests };
+}
+function toCSV(data){
+  const rows = [];
+  rows.push(['Vehicle A']); rows.push(['VRM','Make','Colour','Fuel','MOT Status','Tax Status']);
+  const a = data.summaryA; rows.push([a.vrm,a.make,a.colour,a.fuel,a.mot,a.tax]);
+  if(data.summaryB && data.summaryB.vrm && data.summaryB.vrm!=='—'){
+    rows.push([]); rows.push(['Vehicle B']); rows.push(['VRM','Make','Colour','Fuel','MOT Status','Tax Status']);
+    const b = data.summaryB; rows.push([b.vrm,b.make,b.colour,b.fuel,b.mot,b.tax]);
+  }
+  rows.push([]); rows.push(['MOT History (A)']); rows.push(['completed / result / odometer / defects']);
+  (data.tests||[]).forEach(t=>{
+    const d = (t.completedDate||t.date||''); const r = (t.testResult||t.result||''); const od = (t.odometerValue||'')+(t.odometerUnit?' '+t.odometerUnit:'');
+    const defects = (t.rfrAndComments||t.defects||t.advisories||[]).map(x=> (x.type||x.deficiencyCategory||'') + ' ' + (x.text||x.deficiencyText||'')).join(' | ');
+    rows.push([`${d} / ${r} / ${od} / ${defects}`]);
+  });
+  return rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('
+');
+}
+function downloadBlob(filename, content, type='text/plain'){
+  const blob = new Blob([content], {type});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download=filename; a.click();
+  URL.revokeObjectURL(url);
+}
+function applyFilters(){
+  const failsOnly = el('failsOnly').checked;
+  const toggles = Array.from(document.querySelectorAll('.chipToggle'));
+  const allowed = new Set(toggles.filter(t=>t.checked).map(t=>t.dataset.chip));
+  document.querySelectorAll('#history .test').forEach(div=>{
+    const isFail = (div.dataset.result||'').toUpperCase()==='FAILED';
+    if(failsOnly && !isFail){ div.style.display='none'; return; }
+    let hasAllowed = false;
+    const chips = div.querySelectorAll('.chip');
+    if(chips.length===0){ hasAllowed = !failsOnly; }
+    chips.forEach(c=>{ if(allowed.has((c.dataset.type||'').toUpperCase())) hasAllowed = true; });
+    div.style.display = hasAllowed ? '' : 'none';
+  });
+}
+document.querySelectorAll('.chipToggle').forEach(cb=> cb.addEventListener('change', applyFilters));
+el('failsOnly').addEventListener('change', applyFilters);
+
+document.getElementById('lookupForm').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  el('errorBox').style.display='none';
+  const vrmA = cleanVrm(el('vrm').value);
+  const vrmB = cleanVrm(el('vrm2').value);
+  if(vrmA.length < MIN_VRM_LEN || vrmA.length > MAX_VRM_LEN){ showError('Please enter a valid first registration.'); return; }
+  const now = Date.now();
+  if(backoff > 0 && (now - lastCall)/1000 < backoff){ showError('Please wait a moment before trying again.'); return; }
+  try{
+    setStatus('Checking…'); el('searchBtn').disabled = true; el('searchBtn').innerHTML = 'Searching <span class="spinner"></span>';
+    const tokenA = await antiSpamToken(vrmA); if(!tokenA) throw new Error('Failed anti-spam verification.');
+    const calls = [fetchVes(vrmA, tokenA), fetchMotTests(vrmA, tokenA)];
+    let tokenB=null; if(vrmB){ tokenB = await antiSpamToken(vrmB); calls.push(fetchVes(vrmB, tokenB)); }
+    setStatus('Fetching data…');
+    const res = await Promise.all(calls);
+    const vesA = res[0], testsA = res[1], vesB = vrmB ? res[2] : null;
+    renderSummaryTo('sA', vesA||{}); renderHistory(testsA||[]); drawSparkline('sparkA', testsA||[]);
+    if(vesB){ renderSummaryTo('sB', vesB||{}); el('sumB').style.opacity=1; } else { ['vrm','make','colour','fuel','mot','tax'].forEach(k=> el('sB-'+k).textContent='—'); el('sumB').style.opacity=.6; }
+    drawSparkline('sparkB', []);
+    el('output').style.display='grid'; setStatus('Done.');
+    lastCall = Date.now(); backoff = 2;
+    const url = new URL(location.href);
+    url.searchParams.set('vrm', vrmA); if(vrmB) url.searchParams.set('vrm2', vrmB); else url.searchParams.delete('vrm2');
+    history.replaceState(null, '', url.toString());
+  }catch(err){
+    showError('Lookup failed: ' + (err.message || 'unknown error'));
+    backoff = Math.min(Math.max(2, backoff*2 || 2), 300);
+    setStatus('Error');
+  }finally{
+    el('searchBtn').disabled = false; el('searchBtn').textContent = 'Search';
+    el('backendUrlDisplay').textContent = BACKEND_URL;
+  }
+});
+el('clearBtn').addEventListener('click', ()=>{
+  el('vrm').value=''; el('vrm2').value=''; el('output').style.display='none'; el('errorBox').style.display='none'; setStatus(''); history.replaceState(null,'',location.pathname);
+});
+el('shareBtn').addEventListener('click', async ()=>{
+  const v1 = cleanVrm(el('vrm').value), v2 = cleanVrm(el('vrm2').value);
+  const url = new URL(location.href); url.searchParams.set('vrm', v1); if(v2) url.searchParams.set('vrm2', v2); else url.searchParams.delete('vrm2');
+  const link = url.toString();
+  try{ await navigator.clipboard.writeText(link); setStatus('Share link copied'); }catch{ prompt('Copy link:', link); }
+});
+el('exportJSON').addEventListener('click', ()=>{
+  const data = collectData(); downloadBlob(`${data.summaryA.vrm||'report'}.json`, JSON.stringify(data,null,2), 'application/json');
+});
+el('exportCSV').addEventListener('click', ()=>{
+  const data = collectData(); downloadBlob(`${data.summaryA.vrm||'report'}.csv`, toCSV(data), 'text/csv');
+});
+el('downloadPDF').addEventListener('click', ()=>{ window.print(); });
+(function initFromURL(){
+  const p = new URLSearchParams(location.search);
+  const v1 = cleanVrm(p.get('vrm')||''); const v2 = cleanVrm(p.get('vrm2')||'');
+  if(v1){ el('vrm').value = v1; if(v2) el('vrm2').value=v2; document.getElementById('lookupForm').dispatchEvent(new Event('submit')); }
+})();
+el('backendUrlDisplay').textContent = BACKEND_URL;
+</script>
+</body>
+</html>
