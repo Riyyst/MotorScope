@@ -12,28 +12,41 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Deploy to Cloudflare
-        uses: cloudflare/wrangler-action@v3
+
+      # Use Node and install Wrangler ourselves so we get full logs
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: |
-            wrangler --version
+          node-version: '20'
 
-            # Push secrets
-            wrangler secret put ANTISPAM_SECRET --text "${{ secrets.ANTISPAM_SECRET }}"
-            wrangler secret put DVLA_VES_API_KEY --text "${{ secrets.DVLA_VES_API_KEY }}"
+      - name: Install Wrangler
+        run: npm i -g wrangler@3
 
-            # DVSA
-            if [ -n "${{ secrets.DVSA_MOT_CLIENT_ID }}" ]; then wrangler secret put DVSA_MOT_CLIENT_ID --text "${{ secrets.DVSA_MOT_CLIENT_ID }}"; fi
-            if [ -n "${{ secrets.DVSA_MOT_CLIENT_SECRET }}" ]; then wrangler secret put DVSA_MOT_CLIENT_SECRET --text "${{ secrets.DVSA_MOT_CLIENT_SECRET }}"; fi
-            if [ -n "${{ secrets.DVSA_MOT_TOKEN_URL }}" ]; then wrangler secret put DVSA_MOT_TOKEN_URL --text "${{ secrets.DVSA_MOT_TOKEN_URL }}"; fi
-            if [ -n "${{ secrets.DVSA_MOT_SCOPE }}" ]; then wrangler secret put DVSA_MOT_SCOPE --text "${{ secrets.DVSA_MOT_SCOPE }}"; fi
-            if [ -n "${{ secrets.DVSA_MOT_API_KEY }}" ]; then wrangler secret put DVSA_MOT_API_KEY --text "${{ secrets.DVSA_MOT_API_KEY }}"; fi
+      - name: Wrangler version
+        run: wrangler --version
 
-            # FRONTEND_ORIGIN
-            if [ -n "${{ secrets.FRONTEND_ORIGIN }}" ]; then wrangler secret put FRONTEND_ORIGIN --text "${{ secrets.FRONTEND_ORIGIN }}"; fi
+      - name: Verify Cloudflare auth
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler whoami
 
-            # Deploy
-            wrangler deploy --name motorscope-backend --verbose
+      - name: Push secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          wrangler secret put ANTISPAM_SECRET --text '${{ secrets.ANTISPAM_SECRET }}'
+          wrangler secret put DVLA_VES_API_KEY --text '${{ secrets.DVLA_VES_API_KEY }}'
+          if [ -n '${{ secrets.DVSA_MOT_CLIENT_ID }}' ]; then wrangler secret put DVSA_MOT_CLIENT_ID --text '${{ secrets.DVSA_MOT_CLIENT_ID }}'; fi
+          if [ -n '${{ secrets.DVSA_MOT_CLIENT_SECRET }}' ]; then wrangler secret put DVSA_MOT_CLIENT_SECRET --text '${{ secrets.DVSA_MOT_CLIENT_SECRET }}'; fi
+          if [ -n '${{ secrets.DVSA_MOT_TOKEN_URL }}' ]; then wrangler secret put DVSA_MOT_TOKEN_URL --text '${{ secrets.DVSA_MOT_TOKEN_URL }}'; fi
+          if [ -n '${{ secrets.DVSA_MOT_SCOPE }}' ]; then wrangler secret put DVSA_MOT_SCOPE --text '${{ secrets.DVSA_MOT_SCOPE }}'; fi
+          if [ -n '${{ secrets.DVSA_MOT_API_KEY }}' ]; then wrangler secret put DVSA_MOT_API_KEY --text '${{ secrets.DVSA_MOT_API_KEY }}'; fi
+          if [ -n '${{ secrets.FRONTEND_ORIGIN }}' ]; then wrangler secret put FRONTEND_ORIGIN --text '${{ secrets.FRONTEND_ORIGIN }}'; fi
+
+      - name: Deploy worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler deploy --name motorscope-backend --verbose
