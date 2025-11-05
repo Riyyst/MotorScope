@@ -1,0 +1,29 @@
+name: Deploy MotorScope Backend (Cloudflare Worker)
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: |
+            bash -lc "
+            wrangler secret put ANTISPAM_SECRET --text '${{ secrets.ANTISPAM_SECRET }}'
+            wrangler secret put DVLA_VES_API_KEY --text '${{ secrets.DVLA_VES_API_KEY }}'
+            wrangler secret put DVSA_MOT_CLIENT_ID --text '${{ secrets.DVSA_MOT_CLIENT_ID }}'
+            wrangler secret put DVSA_MOT_CLIENT_SECRET --text '${{ secrets.DVSA_MOT_CLIENT_SECRET }}'
+            wrangler secret put DVSA_MOT_API_KEY --text '${{ secrets.DVSA_MOT_API_KEY }}'
+            wrangler secret put DVSA_MOT_SCOPE --text '${{ secrets.DVSA_MOT_SCOPE }}'
+            wrangler secret put DVSA_MOT_TOKEN_URL --text '${{ secrets.DVSA_MOT_TOKEN_URL }}'
+            wrangler secret put FRONTEND_ORIGIN --text '${{ secrets.FRONTEND_ORIGIN }}'
+            wrangler deploy
+            "
