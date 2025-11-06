@@ -1,3 +1,9 @@
 name = "motorscope-backend"
 main = "worker.mjs"
 compatibility_date = "2024-11-01"
+
+[vars]
+FRONTEND_ORIGIN = "https://riystt.github.io/MotorScope"
+
+[env.production]
+workers_dev = true
