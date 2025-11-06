@@ -1,163 +1,277 @@
-/**
- * MotorScope Backend (Cloudflare Worker)
- * Endpoints:
- *  - POST /api/antispam         -> returns a short-lived token (60s). Optional Turnstile validation.
- *  - GET  /api/ves?vrm=AB12CDE  -> DVLA vehicle info (uses DVLA_VES_API_KEY). 5-minute edge cache.
- *  - GET  /api/mot/tests?vrm=   -> DVSA MOT history (OAuth2 + API Key) if DVSA_* secrets set.
- */
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const origin = request.headers.get("Origin") || "";
-    const method = request.method.toUpperCase();
+// MotorScope Cloudflare Worker (CORS + Anti-spam + DVLA/DVSA)
+// -----------------------------------------------------------
+// - FRONTEND_ORIGIN can be a CSV list (e.g., "https://riystt.github.io,https://riystt.github.io/MotorScope")
+// - Anti-spam token is stateless: signed with HMAC, includes vrm + exp
+// - /api/ves uses DVLA VES key
+// - /api/mot/tests uses DVSA (client credentials + x-api-key)
 
-    const allowOrigin = env.FRONTEND_ORIGIN || "";
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": allowOrigin && origin === allowOrigin ? allowOrigin : "",
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-      "Access-Control-Allow-Headers": "content-type,x-client-token",
-      "Vary": "Origin"
-    };
-    if (method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders });
-    }
-    if (!allowOrigin || (origin && origin !== allowOrigin)) {
-      return new Response("Origin not allowed", { status: 403, headers: corsHeaders });
-    }
+const TEXT = { "content-type": "text/plain; charset=utf-8" };
+const JSONH = { "content-type": "application/json; charset=utf-8" };
+const ALLOW_HEADERS = "content-type,x-client-token";
+const ALLOW_METHODS = "GET,POST,OPTIONS";
+const MAX_AGE = "600";
 
-    if (!(await checkRateLimit(request, env))) {
-      return json({ error: "Rate limit exceeded. Try again later." }, 429, corsHeaders);
-    }
-
-    try {
-      if (url.pathname === "/api/antispam" && method === "POST") {
-        return await handleAntiSpam(request, env, corsHeaders);
-      }
-      if (url.pathname === "/api/ves" && method === "GET") {
-        return await handleVES(request, env, ctx, corsHeaders);
-      }
-      if (url.pathname === "/api/mot/tests" && method === "GET") {
-        return await handleMOTTests(request, env, corsHeaders);
-      }
-      return json({ ok: true, service: "motorscope-backend" }, 200, corsHeaders);
-    } catch (e) {
-      return json({ error: e.message || "Server error" }, 500, corsHeaders);
-    }
+// ---------- CORS helpers ----------
+function normalizeOrigin(o) {
+  try { return new URL(o).origin; } catch { return ""; }
+}
+function getAllowedOrigins(env) {
+  return String(env.FRONTEND_ORIGIN || "")
+    .split(",")
+    .map(s => normalizeOrigin(s.trim()))
+    .filter(Boolean);
+}
+function matchOrigin(req, env) {
+  const o = normalizeOrigin(req.headers.get("origin") || "");
+  const allowed = getAllowedOrigins(env);
+  return allowed.includes(o) ? o : "";
+}
+function addCors(req, env, res) {
+  const origin = matchOrigin(req, env);
+  const h = new Headers(res.headers);
+  if (origin) {
+    h.set("Access-Control-Allow-Origin", origin);
+    h.set("Vary", "Origin");
   }
+  return new Response(res.body, { ...res, headers: h });
 }
-function json(body, status = 200, headers = {}) {
-  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+function preflight(req, env) {
+  const origin = matchOrigin(req, env);
+  if (!origin) return new Response("CORS: origin not allowed", { status: 403, headers: TEXT });
+  const h = new Headers();
+  h.set("Access-Control-Allow-Origin", origin);
+  h.set("Access-Control-Allow-Methods", ALLOW_METHODS);
+  h.set("Access-Control-Allow-Headers", ALLOW_HEADERS);
+  h.set("Access-Control-Max-Age", MAX_AGE);
+  h.set("Vary", "Origin");
+  return new Response(null, { status: 204, headers: h });
 }
-async function checkRateLimit(request, env) {
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  const now = Date.now();
-  const key = `rl:${ip}`;
-  if (!env.__RL) env.__RL = new Map();
-  const arr = env.__RL.get(key) || [];
-  const windowMs = 2 * 60 * 1000;
-  const cutoff = now - windowMs;
-  const filtered = arr.filter(ts => ts > cutoff);
-  if (filtered.length >= 30) return false;
-  filtered.push(now);
-  env.__RL.set(key, filtered);
+
+// ---------- Small utils ----------
+const encoder = new TextEncoder();
+async function hmacSha256Hex(secret, data) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(data));
+  return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+function b64urlEncode(jsonObj) {
+  const s = JSON.stringify(jsonObj);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+function b64urlDecodeToJson(b64) {
+  const s = atob(b64.replace(/-/g, "+").replace(/_/g, "/"));
+  return JSON.parse(s);
+}
+function cleanVRM(v) {
+  return String(v || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+function badRequest(msg) { return new Response(msg, { status: 400, headers: TEXT }); }
+function unauthorized(msg) { return new Response(msg, { status: 401, headers: TEXT }); }
+function forbidden(msg) { return new Response(msg, { status: 403, headers: TEXT }); }
+function serverError(msg) { return new Response(msg, { status: 500, headers: TEXT }); }
+
+// ---------- Anti-spam token (stateless HMAC "JWT-lite") ----------
+async function issueToken(env, vrm, lifetimeSeconds = 60) {
+  const now = Math.floor(Date.now()/1000);
+  const payload = { vrm, iat: now, exp: now + lifetimeSeconds, n: crypto.getRandomValues(new Uint32Array(1))[0] };
+  const b64 = b64urlEncode(payload);
+  const sig = await hmacSha256Hex(env.ANTISPAM_SECRET || "", b64);
+  return `${b64}.${sig}`;
+}
+async function verifyToken(env, token, vrmExpected) {
+  if (!token || token.indexOf(".") < 0) return false;
+  const [b64, sig] = token.split(".");
+  const calc = await hmacSha256Hex(env.ANTISPAM_SECRET || "", b64);
+  if (calc !== sig) return false;
+  let payload;
+  try { payload = b64urlDecodeToJson(b64); }
+  catch { return false; }
+  const now = Math.floor(Date.now()/1000);
+  if (!payload || typeof payload !== "object") return false;
+  if (payload.exp < now) return false;
+  if (cleanVRM(payload.vrm) !== cleanVRM(vrmExpected)) return false;
   return true;
 }
-async function handleAntiSpam(request, env, corsHeaders) {
-  const { vrm, token } = await request.json().catch(() => ({}));
-  if (env.TURNSTILE_SECRET && token) {
-    const form = new FormData();
-    form.append("secret", env.TURNSTILE_SECRET);
-    form.append("response", token);
-    const verify = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: form });
-    const out = await verify.json();
-    if (!out.success) return json({ error: "Captcha failed" }, 400, corsHeaders);
-  }
-  const exp = Math.floor(Date.now() / 1000) + 60;
-  const payload = `${(vrm || "").toUpperCase()}|${exp}`;
-  const sig = await hmac(payload, env.ANTISPAM_SECRET || cryptoRandom());
-  return json({ token: `${payload}|${sig}` }, 200, corsHeaders);
-}
-async function validateClientToken(vrm, headerToken, env) {
-  if (!headerToken) return false;
-  const parts = headerToken.split("|");
-  if (parts.length < 3) return false;
-  const [vrmUpper, expStr, sig] = parts;
-  if (vrmUpper !== vrm.toUpperCase()) return false;
-  const exp = parseInt(expStr, 10);
-  if (!exp || exp < Math.floor(Date.now() / 1000)) return false;
-  const payload = `${vrmUpper}|${exp}`;
-  const expected = await hmac(payload, env.ANTISPAM_SECRET || cryptoRandom());
-  return timingSafeEqual(sig, expected);
-}
-function timingSafeEqual(a, b) {
-  if (a.length !== b.length) return false;
-  let out = 0;
-  for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return out === 0;
-}
-async function hmac(message, key) {
-  const enc = new TextEncoder();
-  const cryptoKey = await crypto.subtle.importKey("raw", enc.encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(message));
-  const bytes = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, "0")).join("");
-  return bytes;
-}
-function cryptoRandom() {
-  const arr = new Uint8Array(16);
-  crypto.getRandomValues(arr);
-  return Array.from(arr).map(b => b.toString(16).padStart(2, "0")).join("");
-}
-async function handleVES(request, env, ctx, corsHeaders) {
-  const url = new URL(request.url);
-  const vrm = (url.searchParams.get("vrm") || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-  if (vrm.length < 2 || vrm.length > 10) return json({ error: "Invalid VRM" }, 400, corsHeaders);
-  const clientToken = request.headers.get("x-client-token") || "";
-  const ok = await validateClientToken(vrm, clientToken, env);
-  if (!ok) return json({ error: "Anti-spam token invalid/expired" }, 401, corsHeaders);
-  if (!env.DVLA_VES_API_KEY) return json({ error: "DVLA key not configured" }, 500, corsHeaders);
-  const cacheKey = new Request(`${url.origin}/cache/ves/${vrm}`, { method: "GET" });
-  const cache = caches.default;
-  const cached = await cache.match(cacheKey);
-  if (cached) {
-    return new Response(cached.body, { headers: { ...corsHeaders, "content-type": "application/json", "cf-cache": "HIT" } });
-  }
-  const res = await fetch("https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles", {
+
+// ---------- External API calls ----------
+async function dvlaVES(env, vrm) {
+  // DVLA VES: https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles
+  // POST { registrationNumber: "<VRM>" } with header "x-api-key"
+  const url = "https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles";
+  const r = await fetch(url, {
     method: "POST",
-    headers: { "x-api-key": env.DVLA_VES_API_KEY, "content-type": "application/json", "accept": "application/json" },
-    body: JSON.stringify({ registrationNumber: vrm }),
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": env.DVLA_VES_API_KEY
+    },
+    body: JSON.stringify({ registrationNumber: vrm })
   });
-  if (res.status === 404) return json({ error: "Vehicle not found" }, 404, corsHeaders);
-  if (!res.ok) { const txt = await res.text(); return json({ error: `DVLA error: ${res.status} ${txt}` }, 502, corsHeaders); }
-  const body = await res.text();
-  const resp = new Response(body, { headers: { ...corsHeaders, "content-type": "application/json" } });
-  ctx.waitUntil(cache.put(cacheKey, new Response(body, { headers: { "content-type": "application/json" } })));
-  return resp;
-}
-async function handleMOTTests(request, env, corsHeaders) {
-  const url = new URL(request.url);
-  const vrm = (url.searchParams.get("vrm") || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-  const clientToken = request.headers.get("x-client-token") || "";
-  const ok = await validateClientToken(vrm, clientToken, env);
-  if (!ok) return json({ error: "Anti-spam token invalid/expired" }, 401, corsHeaders);
-  if (!env.DVSA_MOT_CLIENT_ID || !env.DVSA_MOT_CLIENT_SECRET || !env.DVSA_MOT_TOKEN_URL || !env.DVSA_MOT_API_KEY) {
-    return json({ info: "DVSA MOT API not configured yet. Add DVSA_* secrets to enable live MOT history." }, 501, corsHeaders);
+  if (r.status === 404) {
+    return { status: 404, data: { info: "Vehicle not found." } };
   }
-  const params = new URLSearchParams();
-  params.set("grant_type", "client_credentials");
-  params.set("client_id", env.DVSA_MOT_CLIENT_ID);
-  params.set("client_secret", env.DVSA_MOT_CLIENT_SECRET);
-  params.set("scope", env.DVSA_MOT_SCOPE || "https://tapi.dvsa.gov.uk/.default");
-  const tok = await fetch(env.DVSA_MOT_TOKEN_URL, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: params });
-  if (!tok.ok) { const txt = await tok.text(); return json({ error: `DVSA token error: ${tok.status} ${txt}` }, 502, corsHeaders); }
-  const j = await tok.json();
-  const accessToken = j.access_token;
-  const base = env.DVSA_MOT_BASE_URL || "https://tapi.dvsa.gov.uk";
-  const path = env.DVSA_MOT_TESTS_PATH || "/v1/mot-tests";
-  const res = await fetch(`${base}${path}?registration=${vrm}`, {
-    headers: { "Authorization": `Bearer ${accessToken}`, "X-API-Key": env.DVSA_MOT_API_KEY, "Accept": "application/json" }
-  });
-  if (res.status === 404) return json([], 200, corsHeaders);
-  if (!res.ok) { const txt = await res.text(); return json({ error: `DVSA error: ${res.status} ${txt}` }, 502, corsHeaders); }
-  const data = await res.json();
-  return json(data, 200, corsHeaders);
+  if (!r.ok) {
+    const t = await r.text().catch(()=> r.statusText);
+    return { status: r.status, error: `DVLA error: ${t}` };
+  }
+  const data = await r.json();
+  // Light mapping for front-end fields:
+  const mapped = {
+    registrationNumber: data.registrationNumber || vrm,
+    make: data.make || data.makeModel || data.makeModelCode || "",
+    colour: data.colour || data.primaryColour || "",
+    fuelType: data.fuelType || data.fuelTypeDescription || "",
+    taxStatus: data.taxStatus || data.taxed || "",
+    motStatus: data.motStatus || data.mot || ""
+  };
+  return { status: 200, data: mapped };
 }
+
+async function dvsaToken(env) {
+  // Client credentials with AAD
+  const params = new URLSearchParams();
+  params.set("grant_type","client_credentials");
+  if (env.DVSA_MOT_SCOPE) params.set("scope", env.DVSA_MOT_SCOPE);
+  const r = await fetch(env.DVSA_MOT_TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: params.toString(),
+    // Basic auth header (AAD also supports client_id+secret in body, but Header is fine):
+    // Some tenants require this exact format; fall back to body-only if needed.
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(()=> r.statusText);
+    return { error: `DVSA token error: ${t}` };
+  }
+  const j = await r.json();
+  return { access_token: j.access_token, token_type: j.token_type || "Bearer" };
+}
+
+async function dvsaMOT(env, vrm) {
+  // DVSA TAPI historical tests endpoint often looks like:
+  // https://tapi.dvsa.gov.uk/mot/history/vehicle/<VRM>
+  // Needs `Authorization: Bearer <token>` and `x-api-key: <key>`
+  const tok = await dvsaToken(env);
+  if (tok.error || !tok.access_token) return { status: 501, data: { info: "DVSA not configured or token failed." } };
+
+  const url = `https://tapi.dvsa.gov.uk/mot/history/vehicle/${encodeURIComponent(vrm)}`;
+  const r = await fetch(url, {
+    headers: {
+      "authorization": `Bearer ${tok.access_token}`,
+      "x-api-key": env.DVSA_MOT_API_KEY
+    }
+  });
+  if (r.status === 404) return { status: 404, data: { info: "No MOT history found." } };
+  if (!r.ok) {
+    const t = await r.text().catch(()=> r.statusText);
+    return { status: r.status, error: `DVSA error: ${t}` };
+  }
+  const j = await r.json();
+  // j should be an array of tests; pass through for front-end rendering
+  return { status: 200, data: j };
+}
+
+// ---------- Route handlers ----------
+async function handleAntiSpam(req, env) {
+  // CORS check
+  if (!matchOrigin(req, env)) return forbidden("CORS: origin not allowed");
+  let body;
+  try { body = await req.json(); } catch { return badRequest("Invalid JSON"); }
+  const vrm = cleanVRM(body.vrm);
+  if (!vrm || vrm.length < 2 || vrm.length > 10) return badRequest("Invalid VRM");
+  // issue short-lived token (60s)
+  const token = await issueToken(env, vrm, 60);
+  return new Response(JSON.stringify({ token }), { status: 200, headers: JSONH });
+}
+
+async function requireToken(req, env, vrm) {
+  const token = req.headers.get("x-client-token") || "";
+  const ok = await verifyToken(env, token, vrm);
+  if (!ok) return false;
+  return true;
+}
+
+async function handleVES(req, env, url) {
+  if (!matchOrigin(req, env)) return forbidden("CORS: origin not allowed");
+  const vrm = cleanVRM(url.searchParams.get("vrm"));
+  if (!vrm) return badRequest("Missing vrm");
+  if (!(await requireToken(req, env, vrm))) return unauthorized("Invalid token");
+
+  if (!env.DVLA_VES_API_KEY) return serverError("VES not configured");
+  const res = await dvlaVES(env, vrm);
+  if (res.error) return serverError(res.error);
+  return new Response(JSON.stringify(res.data), { status: res.status, headers: JSONH });
+}
+
+async function handleMOT(req, env, url) {
+  if (!matchOrigin(req, env)) return forbidden("CORS: origin not allowed");
+  const vrm = cleanVRM(url.searchParams.get("vrm"));
+  if (!vrm) return badRequest("Missing vrm");
+  if (!(await requireToken(req, env, vrm))) return unauthorized("Invalid token");
+
+  if (!env.DVSA_MOT_CLIENT_ID || !env.DVSA_MOT_CLIENT_SECRET || !env.DVSA_MOT_TOKEN_URL || !env.DVSA_MOT_API_KEY) {
+    // Graceful: tell frontend DVSA isn't configured yet
+    return new Response(JSON.stringify({ info: "DVSA not configured." }), { status: 501, headers: JSONH });
+  }
+  const res = await dvsaMOT(env, vrm);
+  if (res.error) return serverError(res.error);
+  return new Response(JSON.stringify(res.data), { status: res.status, headers: JSONH });
+}
+
+async function handleDebugOrigin(req, env) {
+  const reqOrigin = req.headers.get("origin") || "";
+  const allowed = getAllowedOrigins(env);
+  return new Response(JSON.stringify({ reqOrigin, allowed }, null, 2), { status: 200, headers: JSONH });
+}
+
+// ---------- Worker entry ----------
+export default {
+  async fetch(request, env) {
+    try {
+      const url = new URL(request.url);
+
+      // OPTIONS preflight (CORS)
+      if (request.method === "OPTIONS") {
+        return preflight(request, env);
+      }
+
+      // Routes
+      if (url.pathname === "/api/antispam" && request.method === "POST") {
+        const res = await handleAntiSpam(request, env);
+        return addCors(request, env, res);
+      }
+
+      if (url.pathname === "/api/ves" && request.method === "GET") {
+        const res = await handleVES(request, env, url);
+        return addCors(request, env, res);
+      }
+
+      if (url.pathname === "/api/mot/tests" && request.method === "GET") {
+        const res = await handleMOT(request, env, url);
+        return addCors(request, env, res);
+      }
+
+      // Optional debug endpoint
+      if (url.pathname === "/__debug/origin") {
+        const res = await handleDebugOrigin(request, env);
+        return addCors(request, env, res);
+      }
+
+      // Health
+      if (url.pathname === "/") {
+        const res = new Response("MotorScope backend OK", { status: 200, headers: TEXT });
+        return addCors(request, env, res);
+      }
+
+      return addCors(request, env, new Response("Not found", { status: 404, headers: TEXT }));
+    } catch (err) {
+      const msg = (err && err.message) ? err.message : String(err);
+      return new Response(`Server error: ${msg}`, { status: 500, headers: TEXT });
+    }
+  }
+};
