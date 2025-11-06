@@ -277,9 +277,7 @@ function toCSV(data){
     const defects = (t.rfrAndComments||t.defects||t.advisories||[]).map(x=> (x.type||x.deficiencyCategory||'') + ' ' + (x.text||x.deficiencyText||'')).join(' | ');
     rows.push([`${d} / ${r} / ${od} / ${defects}`]);
   });
-  return rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('
-
-');
+  return rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('');
 }
 function downloadBlob(filename, content, type='text/plain'){
   const blob = new Blob([content], {type});
