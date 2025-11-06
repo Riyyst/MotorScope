@@ -34,7 +34,6 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-
           upsert_secret () {
             NAME="$1"; VAL="$2"
             ( printf 'y\n' | wrangler secret delete "$NAME" --name motorscope-backend >/dev/null 2>&1 ) || true
@@ -42,7 +41,6 @@ jobs:
               printf '%s' "$VAL" | wrangler secret put "$NAME" --name motorscope-backend
             fi
           }
-
           upsert_secret ANTISPAM_SECRET        '${{ secrets.ANTISPAM_SECRET }}'
           upsert_secret DVLA_VES_API_KEY       '${{ secrets.DVLA_VES_API_KEY }}'
           upsert_secret DVSA_MOT_CLIENT_ID     '${{ secrets.DVSA_MOT_CLIENT_ID }}'
@@ -50,10 +48,12 @@ jobs:
           upsert_secret DVSA_MOT_TOKEN_URL     '${{ secrets.DVSA_MOT_TOKEN_URL }}'
           upsert_secret DVSA_MOT_SCOPE         '${{ secrets.DVSA_MOT_SCOPE }}'
           upsert_secret DVSA_MOT_API_KEY       '${{ secrets.DVSA_MOT_API_KEY }}'
-          upsert_secret FRONTEND_ORIGIN        '${{ secrets.FRONTEND_ORIGIN }}'
+          # NOTE: FRONTEND_ORIGIN is handled as a text var at deploy time
 
       - name: Deploy worker code
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: wrangler deploy --name motorscope-backend
+        run: |
+          wrangler deploy --name motorscope-backend \
+            --var FRONTEND_ORIGIN=${{ secrets.FRONTEND_ORIGIN }}
