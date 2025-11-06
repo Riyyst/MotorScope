@@ -12,14 +12,44 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
-        with: { node-version: '20' }
-      - run: npm i -g wrangler@3
-      - run: wrangler --version
+        with:
+          node-version: '20'
+
+      - name: Install Wrangler
+        run: npm i -g wrangler@3
+
+      - name: Verify Cloudflare auth
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      - name: Deploy worker
+        run: |
+          wrangler --version
+          wrangler whoami
+
+      - name: Push secrets to Cloudflare (GitHub = source of truth)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          set_secret () {
+            NAME="$1"; VAL="$2"
+            if [ -n "$VAL" ]; then
+              printf '%s' "$VAL" | wrangler secret put "$NAME" --name motorscope-backend
+            fi
+          }
+          set_secret ANTISPAM_SECRET        '${{ secrets.ANTISPAM_SECRET }}'
+          set_secret DVLA_VES_API_KEY       '${{ secrets.DVLA_VES_API_KEY }}'
+          set_secret DVSA_MOT_CLIENT_ID     '${{ secrets.DVSA_MOT_CLIENT_ID }}'
+          set_secret DVSA_MOT_CLIENT_SECRET '${{ secrets.DVSA_MOT_CLIENT_SECRET }}'
+          set_secret DVSA_MOT_TOKEN_URL     '${{ secrets.DVSA_MOT_TOKEN_URL }}'
+          set_secret DVSA_MOT_SCOPE         '${{ secrets.DVSA_MOT_SCOPE }}'
+          set_secret DVSA_MOT_API_KEY       '${{ secrets.DVSA_MOT_API_KEY }}'
+          set_secret FRONTEND_ORIGIN        '${{ secrets.FRONTEND_ORIGIN }}'
+
+      - name: Deploy worker code
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
