@@ -36,14 +36,30 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          wrangler secret put ANTISPAM_SECRET --text '${{ secrets.ANTISPAM_SECRET }}'
-          wrangler secret put DVLA_VES_API_KEY --text '${{ secrets.DVLA_VES_API_KEY }}'
-          if [ -n '${{ secrets.DVSA_MOT_CLIENT_ID }}' ]; then wrangler secret put DVSA_MOT_CLIENT_ID --text '${{ secrets.DVSA_MOT_CLIENT_ID }}'; fi
-          if [ -n '${{ secrets.DVSA_MOT_CLIENT_SECRET }}' ]; then wrangler secret put DVSA_MOT_CLIENT_SECRET --text '${{ secrets.DVSA_MOT_CLIENT_SECRET }}'; fi
-          if [ -n '${{ secrets.DVSA_MOT_TOKEN_URL }}' ]; then wrangler secret put DVSA_MOT_TOKEN_URL --text '${{ secrets.DVSA_MOT_TOKEN_URL }}'; fi
-          if [ -n '${{ secrets.DVSA_MOT_SCOPE }}' ]; then wrangler secret put DVSA_MOT_SCOPE --text '${{ secrets.DVSA_MOT_SCOPE }}'; fi
-          if [ -n '${{ secrets.DVSA_MOT_API_KEY }}' ]; then wrangler secret put DVSA_MOT_API_KEY --text '${{ secrets.DVSA_MOT_API_KEY }}'; fi
-          if [ -n '${{ secrets.FRONTEND_ORIGIN }}' ]; then wrangler secret put FRONTEND_ORIGIN --text '${{ secrets.FRONTEND_ORIGIN }}'; fi
+          # use stdin piping; target the worker name explicitly
+          echo '${{ secrets.ANTISPAM_SECRET }}'     | wrangler secret put ANTISPAM_SECRET     --name motorscope-backend --quiet
+          echo '${{ secrets.DVLA_VES_API_KEY }}'    | wrangler secret put DVLA_VES_API_KEY    --name motorscope-backend --quiet
+
+          if [ -n '${{ secrets.DVSA_MOT_CLIENT_ID }}' ]; then
+            echo '${{ secrets.DVSA_MOT_CLIENT_ID }}' | wrangler secret put DVSA_MOT_CLIENT_ID --name motorscope-backend --quiet
+          fi
+          if [ -n '${{ secrets.DVSA_MOT_CLIENT_SECRET }}' ]; then
+            echo '${{ secrets.DVSA_MOT_CLIENT_SECRET }}' | wrangler secret put DVSA_MOT_CLIENT_SECRET --name motorscope-backend --quiet
+          fi
+          if [ -n '${{ secrets.DVSA_MOT_TOKEN_URL }}' ]; then
+            echo '${{ secrets.DVSA_MOT_TOKEN_URL }}' | wrangler secret put DVSA_MOT_TOKEN_URL --name motorscope-backend --quiet
+          fi
+          if [ -n '${{ secrets.DVSA_MOT_SCOPE }}' ]; then
+            echo '${{ secrets.DVSA_MOT_SCOPE }}' | wrangler secret put DVSA_MOT_SCOPE --name motorscope-backend --quiet
+          fi
+          if [ -n '${{ secrets.DVSA_MOT_API_KEY }}' ]; then
+            echo '${{ secrets.DVSA_MOT_API_KEY }}' | wrangler secret put DVSA_MOT_API_KEY --name motorscope-backend --quiet
+          fi
+
+          # FRONTEND_ORIGIN can be a normal (non-secret) var, but piping as secret is fine:
+          if [ -n '${{ secrets.FRONTEND_ORIGIN }}' ]; then
+            echo '${{ secrets.FRONTEND_ORIGIN }}' | wrangler secret put FRONTEND_ORIGIN --name motorscope-backend --quiet
+          fi
 
       - name: Deploy worker
         env:
