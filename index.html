@@ -223,7 +223,7 @@ function renderHistory(tests){
     });
     if(defects.length) div.appendChild(chipsBox);
     frag.appendChild(div);
-    raw.append(t);
+    raw.push(t);
   });
   h.appendChild(frag);
   h.dataset.raw = JSON.stringify(raw);
@@ -277,7 +277,7 @@ function toCSV(data){
     const defects = (t.rfrAndComments||t.defects||t.advisories||[]).map(x=> (x.type||x.deficiencyCategory||'') + ' ' + (x.text||x.deficiencyText||'')).join(' | ');
     rows.push([`${d} / ${r} / ${od} / ${defects}`]);
   });
-  return rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('');
+  return rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
 }
 function downloadBlob(filename, content, type='text/plain'){
   const blob = new Blob([content], {type});
