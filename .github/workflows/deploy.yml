@@ -24,12 +24,14 @@ jobs:
       - name: Verify Cloudflare auth
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: wrangler whoami
 
       - name: Push secrets to Cloudflare (GitHub = single source of truth)
         env:
+          # Wrangler picks these up automatically; no --account-id flags needed.
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID:        ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
           # === Your app secrets in GitHub ===
           FRONTEND_ORIGIN:      ${{ secrets.FRONTEND_ORIGIN }}
@@ -49,8 +51,8 @@ jobs:
           cf_secret () {
             local KEY="$1" ; local VAL="$2"
             # delete (auto-confirm) then re-create to avoid "already in use"
-            wrangler --account-id "$CF_ACCOUNT_ID" secret delete "$KEY" --name "$NAME" --yes || true
-            printf "%s" "$VAL" | wrangler --account-id "$CF_ACCOUNT_ID" secret put "$KEY" --name "$NAME"
+            wrangler secret delete "$KEY" --name "$NAME" --yes || true
+            printf "%s" "$VAL" | wrangler secret put "$KEY" --name "$NAME"
           }
 
           # Push each secret from GitHub → Cloudflare
@@ -68,8 +70,8 @@ jobs:
       - name: Deploy worker code
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID:        ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          wrangler --account-id "$CF_ACCOUNT_ID" deploy worker.mjs \
+          wrangler deploy worker.mjs \
             --name motorscope-backend \
             --compatibility-date 2024-11-01
