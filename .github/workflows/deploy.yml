@@ -21,7 +21,6 @@ jobs:
       - name: Install Wrangler
         run: npm i -g wrangler@3
 
-      # We’ll call wrangler directly with env vars. No config file required.
       - name: Verify Cloudflare auth
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -49,9 +48,9 @@ jobs:
 
           cf_secret () {
             local KEY="$1" ; local VAL="$2"
-            # always delete then re-put so we never fail with “already in use” (10053)
-            wrangler secret delete "$KEY" --name "$NAME" --account-id "$CF_ACCOUNT_ID" --quiet || true
-            printf "%s" "$VAL" | wrangler secret put "$KEY" --name "$NAME" --account-id "$CF_ACCOUNT_ID" --quiet
+            # delete (auto-confirm) then re-create to avoid "already in use"
+            wrangler --account-id "$CF_ACCOUNT_ID" secret delete "$KEY" --name "$NAME" --yes || true
+            printf "%s" "$VAL" | wrangler --account-id "$CF_ACCOUNT_ID" secret put "$KEY" --name "$NAME"
           }
 
           # Push each secret from GitHub → Cloudflare
@@ -71,8 +70,6 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CF_ACCOUNT_ID:        ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          # publish worker.mjs as "motorscope-backend" without a wrangler.toml
-          wrangler deploy worker.mjs \
+          wrangler --account-id "$CF_ACCOUNT_ID" deploy worker.mjs \
             --name motorscope-backend \
-            --account-id "$CF_ACCOUNT_ID" \
             --compatibility-date 2024-11-01
