@@ -1,77 +1,162 @@
-name: Deploy MotorScope Backend (Cloudflare Worker)
+/**
+ * MotorScope Backend — Cloudflare Worker (CORS SAFE)
+ *
+ * FRONTEND_ORIGIN can be provided as CFG_FRONTEND_ORIGIN (preferred) or FRONTEND_ORIGIN.
+ * Set it to: https://riystt.github.io
+ */
 
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
+const enc = new TextEncoder();
+const dec = new TextDecoder();
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+/* ---------------- CORS helpers ---------------- */
+function getAllowedOrigin(env) {
+  return env.CFG_FRONTEND_ORIGIN || env.FRONTEND_ORIGIN || "*";
+}
+function corsHeaders(origin) {
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Vary": "Origin",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With, x-client-token",
+    "Access-Control-Max-Age": "86400",
+  };
+}
+function withCORS(resp, origin) {
+  const out = new Response(resp.body, resp);
+  for (const [k, v] of Object.entries(corsHeaders(origin))) out.headers.set(k, v);
+  return out;
+}
+function json(data, { status = 200, headers = {} } = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8", ...headers },
+  });
+}
 
-    steps:
-      - uses: actions/checkout@v4
+/* ---------------- utils ---------------- */
+function cleanVRM(s = "") {
+  return s.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+function q(url, name) {
+  return new URL(url).searchParams.get(name);
+}
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
+/* ------------- anti-spam token (HMAC) ------------- */
+function b64urlEncode(arrBuf) {
+  let s = btoa(String.fromCharCode(...new Uint8Array(arrBuf)));
+  return s.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+function b64urlDecodeToUint8(str) {
+  str = str.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = str.length % 4 ? "=".repeat(4 - (str.length % 4)) : "";
+  const bin = atob(str + pad);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf;
+}
+function jsonToB64url(obj) { return b64urlEncode(enc.encode(JSON.stringify(obj))); }
+function b64urlToJson(str) { return JSON.parse(dec.decode(b64urlDecodeToUint8(str))); }
 
-      - name: Install Wrangler
-        run: npm i -g wrangler@3
+async function hmacSign(data, secret) {
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
+  return b64urlEncode(sig);
+}
+async function createAntiSpamToken(vrm, env) {
+  const now = Date.now();
+  const payload = { vrm, iat: now, exp: now + 120_000 };
+  const body = jsonToB64url(payload);
+  const sig = await hmacSign(body, env.ANTISPAM_SECRET);
+  return `${body}.${sig}`;
+}
 
-      - name: Verify Cloudflare auth
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: wrangler whoami
+/* ------------- DVLA VES ------------- */
+async function getVES(vrm, env) {
+  const url = "https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles";
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": env.DVLA_VES_API_KEY },
+    body: JSON.stringify({ registrationNumber: vrm }),
+  });
+  if (!r.ok) throw new Error(`DVLA VES ${r.status}: ${await r.text().catch(()=>'')}`);
+  return r.json();
+}
 
-      - name: Push secrets to Cloudflare (GitHub = single source of truth)
-        env:
-          # Wrangler picks these up automatically; no --account-id flags needed.
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+/* ------------- DVSA MOT ------------- */
+let _motTokenCache = { token: null, exp: 0 };
+async function getDvsaToken(env) {
+  const now = Date.now();
+  if (_motTokenCache.token && _motTokenCache.exp > now + 10_000) return _motTokenCache.token;
 
-          # === Your app secrets in GitHub ===
-          FRONTEND_ORIGIN:      ${{ secrets.FRONTEND_ORIGIN }}
-          ANTISPAM_SECRET:      ${{ secrets.ANTISPAM_SECRET }}
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: env.DVSA_MOT_CLIENT_ID,
+    client_secret: env.DVSA_MOT_CLIENT_SECRET,
+    scope: env.DVSA_MOT_SCOPE || "https://tapi.dvsa.gov.uk/.default",
+  });
+  const r = await fetch(env.DVSA_MOT_TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  if (!r.ok) throw new Error(`DVSA token ${r.status}: ${await r.text().catch(()=>'')}`);
+  const j = await r.json();
+  _motTokenCache = { token: j.access_token, exp: now + (Number(j.expires_in)||3600) * 1000 };
+  return j.access_token;
+}
+async function getMOT(vrm, env) {
+  const base = env.DVSA_MOT_API_BASE || "https://beta.check-mot.service.gov.uk";
+  const url = `${base}/trade/vehicles/mot-tests?registration=${encodeURIComponent(vrm)}`;
+  const bearer = await getDvsaToken(env);
+  const r = await fetch(url, {
+    headers: { Authorization: `Bearer ${bearer}`, "x-api-key": env.DVSA_MOT_API_KEY, accept: "application/json" },
+  });
+  if (!r.ok) throw new Error(`DVSA MOT ${r.status}: ${await r.text().catch(()=>'')}`);
+  return r.json();
+}
 
-          DVLA_VES_API_KEY:     ${{ secrets.DVLA_VES_API_KEY }}
+/* ---------------- Worker ---------------- */
+export default {
+  async fetch(request, env, ctx) {
+    const origin = getAllowedOrigin(env);
 
-          DVSA_MOT_CLIENT_ID:     ${{ secrets.DVSA_MOT_CLIENT_ID }}
-          DVSA_MOT_CLIENT_SECRET: ${{ secrets.DVSA_MOT_CLIENT_SECRET }}
-          DVSA_MOT_TOKEN_URL:     ${{ secrets.DVSA_MOT_TOKEN_URL }}
-          DVSA_MOT_SCOPE:         ${{ secrets.DVSA_MOT_SCOPE }}
-          DVSA_MOT_API_KEY:       ${{ secrets.DVSA_MOT_API_KEY }}
-        run: |
-          set -euo pipefail
-          NAME="motorscope-backend"
+    // Handle preflight first
+    if (request.method === "OPTIONS") {
+      return withCORS(new Response(null, { status: 204 }), origin);
+    }
 
-          cf_secret () {
-            local KEY="$1" ; local VAL="$2"
-            # delete (auto-confirm) then re-create to avoid "already in use"
-            wrangler secret delete "$KEY" --name "$NAME" --yes || true
-            printf "%s" "$VAL" | wrangler secret put "$KEY" --name "$NAME"
-          }
+    try {
+      const url = new URL(request.url);
 
-          # Push each secret from GitHub → Cloudflare
-          cf_secret FRONTEND_ORIGIN   "${FRONTEND_ORIGIN}"
-          cf_secret ANTISPAM_SECRET   "${ANTISPAM_SECRET}"
+      if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/__healthz")) {
+        return withCORS(json({ ok: true, ts: Date.now() }), origin);
+      }
 
-          cf_secret DVLA_VES_API_KEY  "${DVLA_VES_API_KEY}"
+      if (url.pathname === "/api/antispam" && request.method === "POST") {
+        const body = await request.json().catch(() => ({}));
+        const vrm = cleanVRM(body.vrm || "");
+        if (!vrm) return withCORS(json({ error: "Missing vrm" }, { status: 400 }), origin);
+        const token = await createAntiSpamToken(vrm, env);
+        return withCORS(json({ token }), origin);
+      }
 
-          cf_secret DVSA_MOT_CLIENT_ID     "${DVSA_MOT_CLIENT_ID}"
-          cf_secret DVSA_MOT_CLIENT_SECRET "${DVSA_MOT_CLIENT_SECRET}"
-          cf_secret DVSA_MOT_TOKEN_URL     "${DVSA_MOT_TOKEN_URL}"
-          cf_secret DVSA_MOT_SCOPE         "${DVSA_MOT_SCOPE}"
-          cf_secret DVSA_MOT_API_KEY       "${DVSA_MOT_API_KEY}"
+      if (url.pathname === "/api/ves" && request.method === "GET") {
+        const vrm = cleanVRM(q(request.url, "vrm") || "");
+        if (!vrm) return withCORS(json({ error: "Missing vrm" }, { status: 400 }), origin);
+        const data = await getVES(vrm, env);
+        return withCORS(json(data), origin);
+      }
 
-      - name: Deploy worker code
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          wrangler deploy worker.mjs \
-            --name motorscope-backend \
-            --compatibility-date 2024-11-01
+      if (url.pathname === "/api/mot/tests" && request.method === "GET") {
+        const vrm = cleanVRM(q(request.url, "vrm") || "");
+        if (!vrm) return withCORS(json({ error: "Missing vrm" }, { status: 400 }), origin);
+        const data = await getMOT(vrm, env);
+        return withCORS(json(data), origin);
+      }
+
+      return withCORS(json({ error: "Not found" }, { status: 404 }), origin);
+    } catch (err) {
+      return withCORS(json({ error: "Server error", detail: String(err?.message || err) }, { status: 500 }), getAllowedOrigin(env));
+    }
+  },
+};
